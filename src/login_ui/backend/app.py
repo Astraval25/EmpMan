@@ -9,7 +9,12 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 app.config["SECRET_KEY"] = os.getenv("KIOSK_API_SECRET_KEY", "supersecretkey")
 
@@ -44,6 +49,10 @@ def hash_password(password):
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Let browser CORS preflight pass without JWT.
+        if request.method == "OPTIONS":
+            return ("", 204)
+
         auth_header = request.headers.get("Authorization")
 
         if not auth_header or "Bearer " not in auth_header:
@@ -227,6 +236,104 @@ def get_logs(username):
             logs = cursor.fetchall()
 
     return jsonify(logs)
+
+# ===============================
+# GET USER ANALYTICS
+# ===============================
+
+@app.route("/api/admin/users/<username>/analytics", methods=["GET"])
+@token_required
+def get_user_analytics(username):
+    with get_db() as db:
+        with db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM users
+                WHERE username=%s
+                  AND create_admin_id=%s
+                """,
+                (username, request.admin_id),
+            )
+            user = cursor.fetchone()
+
+            if not user:
+                return jsonify({
+                    "username": username,
+                    "total_logs": 0,
+                    "total_span_seconds": 0,
+                    "total_span_hours": 0.0,
+                    "first_log": None,
+                    "last_log": None,
+                    "hourly_counts": [],
+                    "daily_counts": [],
+                })
+
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*)::int AS total_logs,
+                    MIN(log_time) AS first_log,
+                    MAX(log_time) AS last_log
+                FROM logs
+                WHERE user_id=%s
+                """,
+                (user["user_id"],),
+            )
+            summary = cursor.fetchone() or {}
+
+            first_log = summary.get("first_log")
+            last_log = summary.get("last_log")
+            total_logs = summary.get("total_logs", 0)
+
+            if first_log and last_log:
+                total_span_seconds = int((last_log - first_log).total_seconds())
+                if total_span_seconds < 0:
+                    total_span_seconds = 0
+            else:
+                total_span_seconds = 0
+
+            total_span_hours = round(total_span_seconds / 3600.0, 2)
+
+            cursor.execute(
+                """
+                SELECT
+                    EXTRACT(HOUR FROM log_time)::int AS hour,
+                    COUNT(*)::int AS count
+                FROM logs
+                WHERE user_id=%s
+                GROUP BY hour
+                ORDER BY hour
+                """,
+                (user["user_id"],),
+            )
+            hourly_counts = cursor.fetchall()
+
+            cursor.execute(
+                """
+                SELECT
+                    DATE(log_time) AS day,
+                    COUNT(*)::int AS count
+                FROM logs
+                WHERE user_id=%s
+                GROUP BY day
+                ORDER BY day DESC
+                LIMIT 14
+                """,
+                (user["user_id"],),
+            )
+            daily_counts = cursor.fetchall()
+
+    return jsonify({
+        "username": username,
+        "total_logs": total_logs,
+        "total_span_seconds": total_span_seconds,
+        "total_span_hours": total_span_hours,
+        "first_log": first_log,
+        "last_log": last_log,
+        "hourly_counts": hourly_counts,
+        "daily_counts": daily_counts,
+    })
 
 # ===============================
 # RUN SERVER

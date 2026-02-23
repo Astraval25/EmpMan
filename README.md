@@ -37,3 +37,10 @@ kiosk_lock/
 - Creates Start Menu shortcuts.
 - Optional desktop icon.
 - Runs `scripts\setup_kiosk_task.ps1` after install, so kiosk starts at logon and session unlock.
+
+## Admin Panel Commandes
+ ### Backend Run Commandes
+  - python app.py
+ ### Frontend Run Commandes
+  - npm run dev
+   
